@@ -29,9 +29,6 @@ archives:
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
 
-signs:
-  - artifacts: checksum
-
 changelog:
   use: github
   sort: asc
