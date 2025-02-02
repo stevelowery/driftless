@@ -22,6 +22,8 @@ jobs:
 
       - name: Release
         uses: go-semantic-release/action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
           github-token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           hooks: "goreleaser"
