@@ -1,0 +1,42 @@
+version: 2
+
+project_name: driftless
+release:
+  github:
+    owner: stevelowery
+    name: driftless
+
+builds:
+  - main: main.go
+    binary: driftless
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s
+      - -w
+      - -X github.com/stevelowery/driftless/internal/cmd/version.Version={{.Version}}
+
+archives:
+  - formats: [ tar.gz ]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+
+signs:
+  - artifacts: checksum
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
