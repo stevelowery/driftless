@@ -41,16 +41,6 @@ type Order struct {
 	Team           Team    `csv:"Product Form: Team Name"`
 }
 
-type TeamOrders struct {
-	Middleton  []*Order
-	MountHoreb []*Order
-	Waunakee   []*Order
-}
-
-func (t *TeamOrders) All() []*Order {
-	return append(append(t.Middleton, t.MountHoreb...), t.Waunakee...)
-}
-
 type Raffle struct {
 	Order
 	Team Team `csv:"Product Form: Team Name"`

@@ -11,7 +11,6 @@ import (
 	"github.com/stevelowery/driftless/util/filter"
 	"github.com/stevelowery/driftless/util/group"
 	"github.com/stevelowery/driftless/util/io"
-	"github.com/stevelowery/driftless/util/math"
 )
 
 var (
@@ -22,7 +21,13 @@ type Options struct {
 	OrdersFile     string
 	RaffleFile     string
 	DontationsFile string
+	PayoutsFile    string
 	OutputFile     string
+}
+
+type namedFunction struct {
+	name string
+	fxn  func(order *api.Order) float32
 }
 
 type Service interface {
@@ -50,17 +55,15 @@ func (s *service) Process(ctx context.Context, opts *Options) error {
 	defer csv.Flush()
 
 	// header
-	csv.Write([]string{"", api.TeamMiddleton, api.TeamMoHo, api.TeamWaunakee, "Driftless", "Total"})
+	writeLine(csv, "", api.TeamMiddleton, api.TeamMoHo, api.TeamWaunakee, "Driftless", "Total")
 
-	orders := []*api.Order{}
-	raffles := []*api.Order{}
-	donations := []*api.Donation{}
+	orders := api.Orders{}
+	raffles := api.Orders{}
 
 	// read in the files...
 	for path, slice := range map[string]any{
-		opts.OrdersFile:     &orders,
-		opts.RaffleFile:     &raffles,
-		opts.DontationsFile: &donations,
+		opts.OrdersFile: &orders,
+		opts.RaffleFile: &raffles,
 	} {
 		if err := io.ReadCsvInto(path, slice); err != nil {
 			return err
@@ -68,90 +71,115 @@ func (s *service) Process(ctx context.Context, opts *Options) error {
 	}
 
 	teamRegistrations := group.ByName(filter.ByType(orders, api.TypeRegistration))
+
+	// rider fees
+	riderFees := s.processRiderFees(teamRegistrations, csv)
+
+	// raffle tickets
 	teamRaffles := group.ByTeam(raffles)
+	writeEmptyLine(csv)
+	writeLine(csv, "Raffle", teamRaffles.Middleton.Net(), teamRaffles.MountHoreb.Net(), teamRaffles.Waunakee.Net(), "", teamRaffles.All().Net())
 
-	csv.Write([]string{"", "", "", "", "", ""})
-	csv.Write([]string{"Rider Count", math.Count(teamRegistrations.Middleton), math.Count(teamRegistrations.MountHoreb), math.Count(teamRegistrations.Waunakee), "", math.Count(teamRegistrations.All())})
-	csv.Write([]string{"", "", "", "", "", ""})
-
-	csv.Write([]string{"Revenue", "", "", "", "", ""})
-	for name, fxn := range map[string]func(order *api.Order) float32{
-		"__Rider Fees":  func(order *api.Order) float32 { return order.RiderFeeGross() },
-		"____Discounts": func(order *api.Order) float32 { return order.DiscountAmount },
-		"____Refunds":   func(order *api.Order) float32 { return order.AmountRefunded },
-		"____Net":       func(order *api.Order) float32 { return order.RiderFeeNet() },
-	} {
-		if err := s.reportRegistrationData(teamRegistrations, csv, name, fxn); err != nil {
-			return err
-		}
-	}
-
-	csv.Write([]string{"", "", "", "", "", ""})
-	csv.Write([]string{"__Raffle", math.Sum(teamRaffles.Middleton, totalFxn), math.Sum(teamRaffles.MountHoreb, totalFxn), math.Sum(teamRaffles.Waunakee, totalFxn), "", math.Sum(teamRaffles.All(), totalFxn)})
-
-	if err := s.processDonations(orders, donations, csv); err != nil {
+	// donations
+	donations, err := s.processDonations(opts.DontationsFile, orders, csv)
+	if err != nil {
 		return err
 	}
 
-	csv.Write([]string{"", "", "", "", "", ""})
-	csv.Write([]string{"Pass-throughs", "", "", "", "", ""})
-	for name, fxn := range map[string]func(order *api.Order) float32{
-		"__Blackhawk Fee": func(order *api.Order) float32 { return order.BlackhawkFee() },
-		"__CORP Donation": func(order *api.Order) float32 { return order.CORPDonation() },
-	} {
-		if err := s.reportRegistrationData(teamRegistrations, csv, name, fxn); err != nil {
-			return err
-		}
-	}
+	// pass-throughs
+	passThroughs := s.processPassThroughs(teamRegistrations, orders, csv)
 
-	campingTotal := math.Sum(filter.ByType(orders, api.TypeCamping), totalFxn)
-	csv.Write([]string{"__Camping", "", "", "", campingTotal, campingTotal})
+	// total revenue
+	writeEmptyLine(csv)
+	writeLine(csv, "Total Revenue", "", "", "", "", riderFees+teamRaffles.All().Net()+donations+passThroughs)
 
-	return nil
-}
-
-func (s *service) reportRiderFees(teamOrders *api.TeamOrders, csv *csv.Writer) error {
-
-	for name, fxn := range map[string]func(order *api.Order) float32{
-		"__Rider Fees": func(order *api.Order) float32 { return order.RiderFeeGross() },
-		"__Discounts":  func(order *api.Order) float32 { return order.DiscountAmount },
-		"__Refunds":    func(order *api.Order) float32 { return order.AmountRefunded },
-		"__Net":        func(order *api.Order) float32 { return order.RiderFeeNet() },
-	} {
-		if err := s.reportRegistrationData(teamOrders, csv, name, fxn); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (s *service) reportRegistrationData(teamOrders *api.TeamOrders, csv *csv.Writer, name string, fxn func(order *api.Order) float32) error {
-	if err := csv.Write([]string{name, math.Sum(teamOrders.Middleton, fxn), math.Sum(teamOrders.MountHoreb, fxn), math.Sum(teamOrders.Waunakee, fxn), "", math.Sum(teamOrders.All(), fxn)}); err != nil {
+	_, err = s.processPayouts(opts.PayoutsFile, csv)
+	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
-func (s *service) processDonations(orders []*api.Order, donations []*api.Donation, csv *csv.Writer) error {
+func (s *service) processRiderFees(teamRegistrations *api.TeamOrders, csv *csv.Writer) float32 {
+	writeEmptyLine(csv)
+	writeLine(csv, "Rider Count", teamRegistrations.Middleton.Count(), teamRegistrations.MountHoreb.Count(), teamRegistrations.Waunakee.Count(), "", teamRegistrations.All().Count())
+	writeEmptyLine(csv)
+
+	writeLine(csv, "Rider Fees", teamRegistrations.Middleton.RiderFeeGross(), teamRegistrations.MountHoreb.RiderFeeGross(), teamRegistrations.Waunakee.RiderFeeGross(), "", teamRegistrations.All().RiderFeeGross())
+	writeLine(csv, "__Discounts", teamRegistrations.Middleton.DiscountAmount(), teamRegistrations.MountHoreb.DiscountAmount(), teamRegistrations.Waunakee.DiscountAmount(), "", teamRegistrations.All().DiscountAmount())
+	writeLine(csv, "__Refunds", teamRegistrations.Middleton.AmountRefunded(), teamRegistrations.MountHoreb.AmountRefunded(), teamRegistrations.Waunakee.AmountRefunded(), "", teamRegistrations.All().AmountRefunded())
+	writeLine(csv, "__Net", teamRegistrations.Middleton.RiderFeeNet(), teamRegistrations.MountHoreb.RiderFeeNet(), teamRegistrations.Waunakee.RiderFeeNet(), "", teamRegistrations.All().RiderFeeNet())
+
+	return teamRegistrations.All().RiderFeeNet()
+}
+
+func (s *service) processDonations(path string, orders api.Orders, csv *csv.Writer) (float32, error) {
+
 	teamDonations := group.ByName(filter.ByType(orders, api.TypeRegistration))
+
+	donations := []*api.Donation{}
+	if err := io.ReadCsvInto(path, &donations); err != nil {
+		return 0, err
+	}
 
 	var driftlessTotal float32
 	for _, donation := range donations {
 		driftlessTotal += donation.Total
 	}
 
-	csv.Write([]string{"", "", "", "", "", ""})
-	donationFxn := func(order *api.Order) float32 { return order.DriftlessDonation() }
-	csv.Write([]string{"__Donations", "", "", "", "", ""})
-	csv.Write([]string{"____Standalone", "", "", "", fmt.Sprint(driftlessTotal), fmt.Sprint(driftlessTotal)})
-	csv.Write([]string{"____With Registration", math.Sum(teamDonations.Middleton, donationFxn), math.Sum(teamDonations.MountHoreb, donationFxn), math.Sum(teamDonations.Waunakee, donationFxn), "", math.Sum(teamDonations.All(), donationFxn)})
+	teamsTotal := teamDonations.All().DriftlessDonation()
 
-	return nil
+	writeEmptyLine(csv)
+	writeLine(csv, "Donations", "", "", "", "", "")
+	writeLine(csv, "__Standalone", "", "", "", fmt.Sprint(driftlessTotal), fmt.Sprint(driftlessTotal))
+	writeLine(csv, "__With Registration", teamDonations.Middleton.DriftlessDonation(), teamDonations.MountHoreb.DriftlessDonation(), teamDonations.Waunakee.DriftlessDonation(), "", teamsTotal)
+	writeLine(csv, "__Subtotal", "", "", "", "", driftlessTotal+teamsTotal)
+
+	return driftlessTotal + teamsTotal, nil
 }
 
-func (s *service) processCamping(orders []*api.Order, csv *csv.Writer) error {
-	camping := filter.ByType(orders, api.TypeCamping)
-	csv.Write([]string{"__Camping", "", "", "", math.Sum(camping, totalFxn), ""})
-	return nil
+func (s *service) processPassThroughs(teamorders *api.TeamOrders, orders api.Orders, csv *csv.Writer) float32 {
+	camping := filter.ByType(orders, api.TypeCamping).Net()
+	subtotal := teamorders.All().BlackhawkFee() + teamorders.All().CORPDonation() + camping
+
+	writeEmptyLine(csv)
+	writeLine(csv, "Pass-throughs", "", "", "", "", "")
+	writeLine(csv, "__Blackhawk Fee", teamorders.Middleton.BlackhawkFee(), teamorders.MountHoreb.BlackhawkFee(), teamorders.Waunakee.BlackhawkFee(), "", teamorders.All().BlackhawkFee())
+	writeLine(csv, "__CORP Donation", teamorders.Middleton.CORPDonation(), teamorders.MountHoreb.CORPDonation(), teamorders.Waunakee.CORPDonation(), "", teamorders.All().CORPDonation())
+	writeLine(csv, "__Camping", "", "", "", camping, camping)
+	writeLine(csv, "__Subtotal", "", "", "", "", subtotal)
+
+	return subtotal
+}
+
+func (s *service) processPayouts(path string, csv *csv.Writer) (float32, error) {
+
+	writeEmptyLine(csv)
+	writeLine(csv, "Payouts", "", "", "", "", "")
+
+	payouts := api.Payouts{}
+	if err := io.ReadCsvInto(path, &payouts); err != nil {
+		return 0, err
+	}
+
+	totals := payouts.Total()
+	writeLine(csv, "__Charges", "", "", "", totals.Charges, totals.Charges)
+	writeLine(csv, "__Refunds", "", "", "", totals.Refunds, totals.Refunds)
+	writeLine(csv, "__Fees", "", "", "", totals.Fees, totals.Fees)
+	writeLine(csv, "__Net", "", "", "", totals.Net, totals.Net)
+
+	return totals.Net, nil
+}
+
+func writeEmptyLine(csv *csv.Writer) error {
+	return csv.Write([]string{"", "", "", "", "", ""})
+}
+
+func writeLine(csv *csv.Writer, values ...any) error {
+	vals := []string{}
+	for _, value := range values {
+		vals = append(vals, fmt.Sprint(value))
+	}
+	return csv.Write(vals)
 }

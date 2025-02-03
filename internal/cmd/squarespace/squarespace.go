@@ -23,6 +23,7 @@ func New() *cobra.Command {
 	analyze.Flags().StringVarP(&opts.DontationsFile, "donations-file", "d", "", "path to donations file")
 	analyze.Flags().StringVarP(&opts.RaffleFile, "raffle-file", "r", "", "path to raffle file")
 	analyze.Flags().StringVarP(&opts.OutputFile, "output-file", "O", "", "path to output file")
+	analyze.Flags().StringVarP(&opts.PayoutsFile, "payouts-file", "p", "", "path to payouts file")
 
 	ss.AddCommand(analyze)
 	return ss
